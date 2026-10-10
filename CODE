@@ -1,0 +1,137 @@
+import torch
+import torch.nn as nn
+
+
+class PatchEmbedding(nn.Module):
+    """Splits an image into non-overlapping patches, flattens them,
+
+    and projects them to a specified hidden dimension (embedding size).
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        patch_size: int = 16,
+        emb_size: int = 768,
+        img_size: int = 224,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.n_patches = (img_size // patch_size) ** 2
+
+        self.proj = nn.Conv2d(
+            in_channels,
+            emb_size,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+
+    def forward(self, x):
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1, 2)
+        return x
+
+
+class TransformerEncoderBlock(nn.Module):
+    """Standard Transformer Encoder Block used in Vision Transformers."""
+
+    def __init__(
+        self,
+        emb_size: int = 768,
+        num_heads: int = 12,
+        forward_expansion: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(emb_size)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=emb_size, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.norm2 = nn.LayerNorm(emb_size)
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_size, forward_expansion * emb_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(forward_expansion * emb_size, emb_size),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        norm_x = self.norm1(x)
+        attn_out, _ = self.attn(norm_x, norm_x, norm_x)
+        x = x + attn_out
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class VisionTransformer(nn.Module):
+    """Full ViT skeleton combining Patch Embedding and Transformer Encoder Blocks."""
+
+    img_size: int
+
+    def __init__(
+        self,
+        img_size: int = 224,
+        in_channels: int = 3,
+        patch_size: int = 16,
+        emb_size: int = 768,
+        depth: int = 12,
+        num_heads: int = 12,
+        num_classes: int = 1000,
+    ):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_embed = PatchEmbedding(
+            in_channels, patch_size, emb_size, img_size
+        )
+
+        self.cls_token = nn.Parameter(torch.randn(1, 1, emb_size))
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, 1 + self.patch_embed.n_patches, emb_size)
+        )
+        self.pos_drop = nn.Dropout(p=0.1)
+
+        self.blocks = nn.ModuleList(
+            [
+                TransformerEncoderBlock(emb_size, num_heads)
+                for _ in range(depth)
+            ]
+        )
+
+        self.norm = nn.LayerNorm(emb_size)
+        self.head = nn.Linear(emb_size, num_classes)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.patch_embed(x)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        x = self.pos_drop(x + self.pos_embed)
+
+        for block in self.blocks:
+            x = block(x)
+
+        x = self.norm(x)
+
+        # Classification head uses only the class token output
+        return self.head(x[:, 0])
+
+
+if __name__ == "__main__":
+    dummy_input = torch.randn(2, 3, 224, 224)
+
+    model = VisionTransformer(
+        img_size=224,
+        in_channels=3,
+        patch_size=16,
+        emb_size=768,
+        depth=12,
+        num_heads=12,
+        num_classes=10,
+    )
+
+    output = model(dummy_input)
+    print("Model output shape:", output.shape)
+    
